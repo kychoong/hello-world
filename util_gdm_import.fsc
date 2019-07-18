@@ -1,0 +1,524 @@
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+' $Id: util_gdm_import.fsc 255 2016-02-27 15:26:15Z kchoong $
+' $Log: util_gdm_import.fsc $
+' Revision 1.4  2012/08/07 08:03:23  kchoong
+' increase array dimension fr 100 to 400; increase param values in MID() func
+'
+' Revision 1.3  2012/04/22 10:12:38  kchoong
+' #DELETE COMMAND TO ACCEPT <FLDNAM> & <FLDVAL> ARGUMENTS
+'
+' Revision 1.2  2012/04/11 03:00:26  kchoong
+' enhancement: new command #DELETE #GOTO #STOP
+'
+' Revision 1.1  2012/04/10 07:31:09  kchoong
+' Initial revision
+'
+'
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+' INPUT FILE:
+' may be xls or csv
+' 1st line must always be header
+' 2nd line onwards are data records to be inserted
+' ordering of columns in no particular order
+' date columns formatting must be dd/mm/yyyy
+' sheet of name #AUTOEXEC contains commands to be processed
+' actual gdm data are in other sheets
+' null value or '#' value found in 1st column in data records signify 'remarks' & are ignored
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+OPTION EXPLICIT
+
+CONST xlLastCell = 11	' Last Cell 
+
+SUB PROCESSGLOBALDATAUNIT (LOT_TYPE,VALID_ON,FRRSCHEMA)
+	Echoline	"Lot_type=" & LOT_TYPE & ";" & _
+			"Valid_on=" & VALID_ON & ";" & _
+			"FRRSchema=" & FRRSCHEMA & ";"
+	MAIN_1	LOT_TYPE, VALID_ON
+END SUB
+
+
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+SUB MAIN_1 (argLOTTYP,argVALON)
+
+Dim objIEXPLO
+Dim varXLSFIL
+Dim objXLSAPP
+Dim objXLSWBK
+Dim objXLSSHT
+Dim objXLSRNG
+Dim arrXLSCEL
+Dim arrAUTOEX
+Dim arrGDMCOL
+Dim arrGDMVAL
+Dim varDTEFMT
+Dim varSQLCMD
+Dim varXLSSHT
+Dim varKEYCOL
+Dim varKEYNAM
+Dim varGDMTAB
+Dim varDATFRX
+Dim varDATTOX
+Dim varAMTTYP
+Dim varSQLTPL
+Dim varKEYVAL
+Dim objADOCON
+Dim objADOREC
+Dim varSTEPNO
+Dim varRUNNUM
+Dim hh, ii, jj
+Dim varRECCNT
+Dim varGDMSCH
+set objADOCON = GetNewADOConnection()
+
+
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+' DETERMINE GLOBAL DATA UNIT INFO
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+' global data unit info would have been passed in auto'ly by sub-routine PROCESSGLOBALDATAUNIT
+
+Echolinedebug	"Lot_type=" & argLOTTYP
+Echolinedebug	"Valid_on=" & argVALON
+varGDMSCH = GetParameter("FA_SCHEMA_NAME")
+Echolinedebug	"GDM_Schema=" & varGDMSCH
+
+
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+' ACCEPT INPUT FROM USER TO SELECT THE EXCEL FILE TO IMPORT DATA FROM
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+' open a I/E document for input/output
+' In WinXP it is possible to do: set objDlg = CreateObject("UserAccounts.CommonDialog")
+' But this field is removed from Win7, so we will use the internet explorer 
+' click button as substitute
+
+set objIEXPLO = Addwindow("","about:blank")
+Do Until objIEXPLO.Readystate = 4: Sleep 100: Loop
+
+' prompt to select interface mapping xls
+
+objIEXPLO.Document.Write("Global dataunit-" & argLOTTYP & "/" & argVALON & "<br>")
+objIEXPLO.Document.Write("<input name=Button_1 type=file><br>")
+objIEXPLO.Document.All.Button_1.Focus
+objIEXPLO.Document.All.Button_1.Click
+varXLSFIL = objIEXPLO.Document.All.Button_1.Value
+objIEXPLO.Navigate("about:blank")
+EcholineDebug "File = " & varXLSFIL
+Sleep 100
+
+' validate file selected
+
+if varXLSFIL = "" then
+	Writeln objIEXPLO,"No file selected."
+	Exit sub
+end if
+
+Writeln objIEXPLO,ScriptName & " " & Now
+Writeln objIEXPLO,"File selected-" & varXLSFIL
+if right(lcase(varXLSFIL),4) <> ".xls" and _
+   right(lcase(varXLSFIL),5) <> ".xlsx" then
+	Writeln objIEXPLO,"File is not of Excel type xls/xlsx"
+	Exit sub
+end if
+
+' c:\fakepath error msg
+' http://www.telerik.com/community/forums/aspnet-ajax/upload/ie8-upload-control-shows-quot-c-fakepath-quot.aspx
+
+if instr(varXLSFIL,"fakepath") > 0 then
+	MsgBox "Real local directory path is hidden by Internet Explorer; You must make this setting: Control Panel > Internet Option > Security > Custom > Enable 'Include local directory path when uploading files to a server'"
+	Exit sub
+end if
+
+
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+' WHAT FORMAT ARE DATES SPECIFIED IN FILE?
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+varDTEFMT = replace(	"to_date('<dtefld>','<dtefmt>')" , "<dtefmt>" , "dd/mm/yyyy"	)
+
+
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+' START EXCEL APPL'N TO LOAD THE SELECTED FILE & READ THE #AUTOEXEC SHEET
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+' start excel and open selected excel file in read-only mode
+
+set objXLSAPP = Createobject("Excel.Application")
+objXLSAPP.Displayalerts = False			' do not show prompts
+objXLSAPP.Interactive = False			' do not allow interaction
+objXLSAPP.Visible = False			' do not show in screen
+set objXLSWBK = objXLSAPP.WorkBooks.Open (varXLSFIL,,True)
+
+' try activate the #autoexec sheet... this has the commands to be executed
+
+On Error Resume Next
+objXLSWBK.Worksheets("#AUTOEXEC").Activate		' look for autoexec sheet
+if Err.Number <> 0 then
+	Writeln objIEXPLO,"No '#AUTOEXEC' sheet found: no commands to execute"
+	Exit sub
+end if
+set objXLSSHT = objXLSWBK.ActiveSheet
+On Error Goto 0
+
+' select in 1st sheet: all cells from A1 to <last-cell>
+
+objXLSSHT.Range("G1").Value = "0"		' pad to 7 cols in case #AUTOEXEC has below min of 6
+objXLSSHT.Range("A1").Select
+set objXLSRNG = objXLSSHT.Range("A1", objXLSSHT.Cells(1,1).SpecialCells(xlLastCell))
+
+' paste them into a 2-d array for easy manipulation
+' note this target array is subscript one-based
+
+arrAUTOEX = objXLSRNG.Value		' =>> very nice trick; we can directly assign a excel range to an 2-d array
+
+
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+' NOW READ EACH ROW IN TURN & EXECUTE THE COMMAND
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+for varSTEPNO = 1 to UBound(arrAUTOEX,1)
+
+	'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+	' #goto command: #GOTO <STEP#>
+	' unconditional jump/goto step# (equiv to row# in Excel>
+	'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+	if arrAUTOEX(varSTEPNO,1) = "#GOTO" then
+
+		' print output
+
+		Writeln objIEXPLO,arrAUTOEX(varSTEPNO,1) & "/" & arrAUTOEX(varSTEPNO,2)
+
+		' set to step#
+
+		varSTEPNO = arrAUTOEX(varSTEPNO,2)
+
+	end if
+
+	'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+	' #rowtype command: #ROWTYPE <RUN#>
+	' a run id to be assigned into ROW_TYPE; when deleting all records of <RUN#> will be effected
+	'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+	if arrAUTOEX(varSTEPNO,1) = "#ROWTYPE" then
+
+		' print output
+
+		Writeln objIEXPLO,arrAUTOEX(varSTEPNO,1) & "/" & arrAUTOEX(varSTEPNO,2)
+
+		' set runnum
+
+		varRUNNUM = arrAUTOEX(varSTEPNO,2)
+
+	end if
+
+	'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+	' #stop command: #STOP
+	' unconditional stop/end program command
+	'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+	if arrAUTOEX(varSTEPNO,1) = "#STOP" then
+
+		' print output
+
+		Writeln objIEXPLO,arrAUTOEX(varSTEPNO,1)
+
+		' exit loop
+
+		Exit for
+
+	end if
+
+	'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+	' #prikey command: #PRIKEY <DATASHT> <COLIDX>
+	' keep details about the pri key ref field name & position
+	'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+	if arrAUTOEX(varSTEPNO,1) = "#PRIKEY" then
+
+		' print output
+
+		Writeln objIEXPLO,arrAUTOEX(varSTEPNO,1) & "/" & arrAUTOEX(varSTEPNO,2) & "/" & arrAUTOEX(varSTEPNO,3)
+
+		' activate the data-sheet
+
+		varXLSSHT = arrAUTOEX(varSTEPNO,2)
+		objXLSWBK.Worksheets(varXLSSHT).Activate		' note will crash if not found
+		set objXLSSHT = objXLSWBK.ActiveSheet
+
+		' assign the key ref field name
+
+		varKEYCOL = arrAUTOEX(varSTEPNO,3)+0 : varKEYCOL = fn_ColIndex(varKEYCOL)
+		varKEYNAM = fn_Basename( objXLSSHT.Cells(1,varKEYCOL).Value )
+
+	end if
+
+	'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+	' #delete command: #DELETE <GDMTAB> <COND>
+	' delete from GDM table all records having <COND>
+	'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+	if arrAUTOEX(varSTEPNO,1) = "#DELETE" then
+
+		' print output
+
+		Writeln objIEXPLO,arrAUTOEX(varSTEPNO,1) & "/" & arrAUTOEX(varSTEPNO,2) & "/" & arrAUTOEX(varSTEPNO,3) & "/" & arrAUTOEX(varSTEPNO,4)
+
+		' assign operands/variables from command
+
+		varGDMTAB = arrAUTOEX(varSTEPNO,2)
+		varKEYNAM = arrAUTOEX(varSTEPNO,3)
+		varKEYVAL = arrAUTOEX(varSTEPNO,4)
+
+		' compose sql delete statement
+
+		varSQLCMD = "delete from <gdmsch>.<gdmtab> where VALID_ON=<valon> and LOT_TYPE_FK=<lottyp> and row_type=<runnum> and <gdmcol>=<gdmval>"
+		varSQLCMD = replace(	varSQLCMD,	"<gdmsch>",	varGDMSCH	)
+		varSQLCMD = replace(	varSQLCMD,	"<gdmtab>",	varGDMTAB	)
+		varSQLCMD = replace(	varSQLCMD,	"<valon>",	argVALON	)
+		varSQLCMD = replace(	varSQLCMD,	"<lottyp>",	argLOTTYP	)
+		varSQLCMD = replace(	varSQLCMD,	"<runnum>",	varRUNNUM	)
+		varSQLCMD = replace(	varSQLCMD,	"<gdmcol>",	varKEYNAM	)
+		varSQLCMD = replace(	varSQLCMD,	"<gdmval>",	varKEYVAL	)
+		EcholineDebug varSQLCMD
+
+'		On Error Resume Next
+		objADOCON.Execute varSQLCMD,varRECCNT
+		Writeln objIEXPLO,"  .. Deleted-" & varRECCNT
+
+
+		if Err.Number > 0 Then
+			Raise Err.Number & "-" & Err.Description & "; " & varXLSSHT & "/" & varGDMTAB & "/" & ii & "/" & varKEYVAL
+		End if
+		On Error Goto 0
+
+	end if
+
+	'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+	' #load command: #LOAD <DATASHT> <GDMTAB> <COLFR> <COLTO> <AMT#>
+	' load records from specified datasheet
+	'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+	if arrAUTOEX(varSTEPNO,1) = "#LOAD" then
+
+		' print output
+
+		Writeln objIEXPLO,arrAUTOEX(varSTEPNO,1) & "/" & arrAUTOEX(varSTEPNO,2) & "/" & arrAUTOEX(varSTEPNO,3) & "/" & arrAUTOEX(varSTEPNO,4)
+
+		' assign operands/variables from command
+
+		varXLSSHT = arrAUTOEX(varSTEPNO,2)
+		varGDMTAB = arrAUTOEX(varSTEPNO,3)
+		varDATFRX = arrAUTOEX(varSTEPNO,4) : varDATFRX = fn_ColIndex(varDATFRX)
+		varDATTOX = arrAUTOEX(varSTEPNO,5) : varDATTOX = fn_ColIndex(varDATTOX)
+		varAMTTYP = arrAUTOEX(varSTEPNO,6)
+
+		' activate the data-sheet
+
+		objXLSWBK.Worksheets(varXLSSHT).Activate
+		set objXLSSHT = objXLSWBK.ActiveSheet
+
+		' assign all cell contents into a array for manipulation
+
+		objXLSSHT.Range("A1").Select
+		set objXLSRNG = objXLSSHT.Range("A1", objXLSSHT.Cells(1,1).SpecialCells(xlLastCell))
+		arrXLSCEL = objXLSRNG.Value		' =>> very nice trick; we can directly assign a excel range to an 2-d array
+
+		' redim / reinit array to nothings
+
+		ReDim arrGDMCOL( 400 )
+		ReDim arrGDMVAL( 400 )
+
+		' 1st row in data-sheet is column/field headers
+		' keep the specified column field names from data-sheet
+
+		for ii = varDATFRX to varDATTOX
+			arrGDMCOL(ii) = fn_Basename(arrXLSCEL(01,ii))
+		next
+'		EcholineDebug join(arrGDMCOL,",")
+
+		' there are 3 templates of sql insert statement
+
+		varSQLTPL = fn_SQLTemplate(arrGDMCOL,varKEYNAM,varAMTTYP)
+
+		' other rows in data-sheet is actual column data values
+		' pick them up n start composing INSERT SQL stmt
+
+		varRECCNT = 0
+		for ii = 2 to UBound(arrXLSCEL,1)
+
+			' print output
+
+			Echoline ii & ":: " & varXLSSHT & "/" & varGDMTAB & "/" & arrXLSCEL(ii,varKEYCOL)
+
+			' if 1st column is null or '#' then skip as it is remarks/comment
+
+			if Left(arrXLSCEL(ii,01),1) <> "" and Left(arrXLSCEL(ii,01),1) <> "#" then
+
+				' set primary key field value
+
+				varKEYVAL = arrXLSCEL(ii,varKEYCOL)
+
+				' move contents into a 1-d array
+
+				for jj = varDATFRX to varDATTOX
+
+					if isDate(arrXLSCEL(ii,jj)) then
+						arrGDMVAL(jj) = replace( varDTEFMT,"<dtefld>",arrXLSCEL(ii,jj) )
+					else
+						arrGDMVAL(jj) = "'" & arrXLSCEL(ii,jj) & "'"
+					end if
+
+				next 'jj
+'				EcholineDebug join(arrGDMVAL,",")
+
+				' compose sql insert statement
+
+				varSQLCMD = varSQLTPL
+
+				varSQLCMD = replace(	varSQLCMD,	"<gdmsch>",	varGDMSCH	)
+				varSQLCMD = replace(	varSQLCMD,	"<gdmtab>",	varGDMTAB	)
+				varSQLCMD = replace(	varSQLCMD,	"<valon>",	argVALON	)
+				varSQLCMD = replace(	varSQLCMD,	"<lottyp>",	argLOTTYP	)
+				varSQLCMD = replace(	varSQLCMD,	"<runnum>",	varRUNNUM	)
+				varSQLCMD = replace(	varSQLCMD,	"<keynam>",	varKEYNAM	)
+				varSQLCMD = replace(	varSQLCMD,	"<keyval>",	varKEYVAL	)
+				varSQLCMD = replace(	varSQLCMD,	"<amttyp>",	varAMTTYP	)
+				varSQLCMD = replace(	varSQLCMD,	"<gdmcol>",	fn_Concat(arrGDMCOL,varDATFRX,varDATTOX)	)
+				varSQLCMD = replace(	varSQLCMD,	"<gdmval>",	fn_Concat(arrGDMVAL,varDATFRX,varDATTOX)	)
+'				EcholineDebug ii & ":::::" & varSQLCMD
+
+				if not( varAMTTYP <> "" and instr(varSQLCMD,"XXX") > 0 ) then
+	'				On Error Resume Next
+					objADOCON.Execute varSQLCMD,hh
+					if Err.Number > 0 Then
+						Raise Err.Number & "-" & Err.Description & "; " & varXLSSHT & "/" & varGDMTAB & "/" & ii & "/" & varKEYVAL
+					End if
+					varRECCNT = varRECCNT + hh
+					On Error Goto 0
+				end if
+
+			end if
+
+		next 'ii
+		Writeln objIEXPLO,"  .. Inserted-" & varRECCNT
+
+	end if
+
+next
+
+
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+' CLOSE EXCEL APPLICATION
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+objXLSWBK.Close
+objXLSAPP.Quit
+
+
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+' DONE
+'''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+Writeln objIEXPLO,"END " & Now
+Refresh
+
+
+END SUB
+
+
+
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''''
+
+FUNCTION fn_ColIndex (argCOLREF)
+
+	if isNumeric(argCOLREF) then
+		fn_ColIndex = argCOLREF
+	elseif len(argCOLREF) = 1 and argCOLREF >= "A" and argCOLREF <= "Z" then
+		fn_ColIndex = asc(argCOLREF) - 64
+	elseif len(argCOLREF) = 2 and argCOLREF >= "AA" and argCOLREF <= "ZZ" then
+		fn_ColIndex = (asc(left(argCOLREF,1)) - 64) * 26 + (asc(right(argCOLREF,1)) - 64)
+	end if
+
+END FUNCTION
+
+
+FUNCTION fn_Concat (arrSTRING,argCOLFR,argCOLTO)
+
+	Dim varOUTPUT
+
+	varOUTPUT = Join(arrSTRING,",")
+	varOUTPUT = Replace(varOUTPUT,",,","")
+	if Left(varOUTPUT,1) = "," Then varOUTPUT = Mid(varOUTPUT,2,1999)
+	if Right(varOUTPUT,1) = "," Then varOUTPUT = Left(varOUTPUT,Len(varOUTPUT)-1)
+	fn_Concat = varOUTPUT
+
+END FUNCTION
+
+
+FUNCTION fn_Basename (argCOLNAM)
+
+	Dim intIndex
+	argCOLNAM = Replace(argCOLNAM,"#","")
+	intIndex = InStrRev(argCOLNAM,".")
+	if intIndex > 0 Then argCOLNAM = Mid(argCOLNAM,intIndex+1,99)
+	fn_Basename = argCOLNAM
+
+END FUNCTION
+
+
+FUNCTION fn_SQLTemplate (arrGDMCOL,argKEYNAM,argAMTTYP)
+
+	if argAMTTYP > 0 Then
+		' insert into l2_xxx_amount
+		fn_SQLTemplate = _
+			"insert into <gdmsch>.<gdmtab> (<gdmcol>,<keynam>,TYP_AMOUNT,IDE_SCENARIO_FK,VALID_ON,LOT_TYPE_FK,STATUS,ROW_TYPE) " & _
+			"values (<gdmval>,'<keyval>','<amttyp>','0',<valon>,<lottyp>,05,<runnum>)"
+	Elseif Instr( Join(arrGDMCOL),argKEYNAM ) > 0 Then
+		' insert into l2_core
+		fn_SQLTemplate = _
+			"insert into <gdmsch>.<gdmtab> (<gdmcol>,VALID_ON,LOT_TYPE_FK,STATUS,ROW_TYPE) " & _
+			"values (<gdmval>,<valon>,<lottyp>,05,<runnum>)"
+	Elseif InStr( Join(arrGDMCOL),argKEYNAM ) = 0 Then
+		' insert into l2_extension
+		fn_SQLTemplate = _
+			"insert into <gdmsch>.<gdmtab> (<gdmcol>,<keynam>,VALID_ON,LOT_TYPE_FK,STATUS,ROW_TYPE) " & _
+			"values (<gdmval>,'<keyval>',<valon>,<lottyp>,05,<runnum>)"
+	Else
+		' do not expect this
+		fn_SQLTemplate = ""
+	End if
+
+END FUNCTION
+
+
+SUB WRITELN (ARGIEXPLO,ARGTEXTLN)
+	Echoline argTEXTLN
+	argIEXPLO.Document.Write(argTEXTLN&"<br>")
+END SUB
+
+
+'	create table aa1 (intf int, charf char(10))
+'	insert into aa1 values (2, 'aa')
+'	
+'	Dim cn As New adodb.Connection
+'	Dim rs As New adodb.Recordset
+'	Dim cmd As New adodb.Command
+'	
+'	cn.ConnectionString = "Provider=SQLOLEDB;Data Source=alexverb2;uid=sa;pwd=foo$bar00;"
+'	
+'	cn.Open
+'	rs.Open "select * from xxx..aa1", cn, adOpenKeyset, adLockOptimistic
+'	
+'	Dim fieldsArray(1) As Variant
+'	fieldsArray(0) = "intf"
+'	fieldsArray(1) = "charf"
+'	Dim values(1) As Variant
+'	values(0) = 4
+'	values(1) = "as"
+'	rs.AddNew fieldsArray, values
+'	rs.Update
